@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import os
 import requests
 import sys
@@ -37,17 +38,27 @@ def get_file():
     url = "https://linuxnet.ca/ieee/oui/nmap-mac-prefixes"
     print("[*] Downloading 'nmap-mac-prefixes' from https://linuxnet.ca.")
 
-    # Get the requested file. 
-    response = requests.get(url, stream=True)
+    try:
+        # Get the requested file. 
+        response = requests.get(url, stream=True)
 
-    # Create the 'vendormacs.txt' file.
-    with open("nmap-oui.txt", 'w') as out_file:
+        # Create the 'vendormacs.txt' file.
+        with open("nmap-oui.txt", 'w') as out_file:
 
-        # Write the returned data in chunks of 64 bytes.
-        for chunk in response.iter_content(chunk_size=64):
-            out_file.write(chunk.decode())
+            # Write the returned data in chunks of 64 bytes.
+            for chunk in response.iter_content(chunk_size=64):
+                out_file.write(chunk.decode())
 
-    print("[*] File created.")
+        print("[*] File created.")
+        
+    except KeyboardInterrupt:
+        print("User requested an exit.")
+        print("Shutting down...")
+        sys.exit(0)
+    
+    except Exception as e:
+        print("{0}".format(e))
+        sys.exit(0)
 
 
 def create_mac_address(mac_address):
@@ -57,7 +68,6 @@ def create_mac_address(mac_address):
 def read_nmap_file():
     with open("nmap-oui.txt") as file:
         for line in file.readlines():
-
             # Split the spaces.
             data = line.split()
 
@@ -68,6 +78,82 @@ def read_nmap_file():
             vendor_name = " ".join(data[1:len(data)])
 
             yield mac_prefix, vendor_name
+
+
+def create_connection():
+    """ Create the oui database or establish a connection to it. """
+    try:
+        # Creates the database.
+        conx = sqlite3.connect("oui.db")
+        return conx
+
+    except sqlite3.Error as sqliteError:
+        raise sqlite3.Error(sqliteError)
+    
+    except Exception as e:
+        raise Exception(e)
+    
+    return None
+
+
+def create_oui_table(conx):
+    """ Create the oui table. """
+    create_table_sql = """ CREATE TABLE IF NOT EXISTS oui (
+                                id integer PRIMARY KEY,
+                                mac_prefix text NOT NULL,
+                                vendor_name text NOT NULL
+                     );"""
+    try:
+        # Create the database cursor.
+        cursor = conx.cursor()
+        
+        # Execute the sql query.
+        cursor.execute(create_table_sql)
+
+    except sqlite3.Error as sqliteError:
+        cursor.close()
+        raise sqlite3.Error(sqliteError)
+    
+    except Exception as e:
+        cursor.close()
+        raise Exception(e)
+    
+    finally:
+        return cursor
+    
+
+def insert_oui_data(cursor):
+    """ Insert the oui data in the oui table. """
+    start_time = time.time()
+    # Declare sql insert query.
+    insert_query = "INSERT OR IGNORE INTO oui (mac_prefix, vendor_name) VALUES(?, ?)"
+    
+    try:
+        # Start sql transaction
+        cursor.execute("BEGIN TRANSACTION")
+
+        # Count of sql rows.
+        rows = 1
+
+        # Bulk insert.
+        for mac_prefix, vendor_name in read_nmap_file():
+            cursor.execute(insert_query, (mac_prefix, vendor_name))
+            rows += 1
+        
+        # Close transaction.
+        cursor.execute("COMMIT")
+
+        print("[*] Took {0:3f} sec to insert {1} rows.".format((time.time() - start_time), rows))
+
+    except sqlite3.Error as sqliteError:
+        raise sqlite3.Error(sqliteError)
+    
+    except Exception as e:
+        raise Exception(e)
+    
+    finally:
+        cursor.close()
+    
 
 
 def parse_nmap_file():
@@ -93,68 +179,6 @@ def parse_nmap_file():
         sys.exit()
 
 
-def create_connection():
-    """ Create the oui database. """
-    try:
-        # Creates the database.
-        conx = sqlite3.connect("oui.db")
-        return conx
-
-    except sqlite3.Error as sqliteError:
-        raise sqliteError
-    
-    return None
-
-
-def create_oui_table(conx):
-    """ Create the oui table. """
-    create_table_sql = """ CREATE TABLE IF NOT EXISTS oui (
-                                id integer PRIMARY KEY,
-                                mac_prefix text NOT NULL,
-                                vendor_name text NOT NULL
-                     );"""
-    try:
-        # Create the database cursor.
-        cursor = conx.cursor()
-        
-        # Execute the sql query.
-        cursor.execute(create_table_sql)
-
-        return cursor
-
-    except sqlite3.Error as sqliteError:
-        cursor.close()
-        raise sqliteError
-
-    return None
-    
-
-def insert_oui_data(cursor):
-    """ Insert the oui data in the oui table. """
-    start_time = time.time()
-    # Declare sql insert query.
-    insert_query = "INSERT OR IGNORE INTO oui (mac_prefix, vendor_name) VALUES(?, ?)"
-    
-    # Start sql transaction
-    cursor.execute("BEGIN TRANSACTION")
-
-    # Count of sql rows.
-    rows = 1
-
-    # Bulk insert.
-    for mac_prefix, vendor_name in read_nmap_file():
-        cursor.execute(insert_query, (mac_prefix, vendor_name))
-        rows += 1
-    
-    # Close transaction.
-    cursor.execute("COMMIT")
-
-    # Close cursor.
-    cursor.close()
-
-    print("[*] Took {0:3f} sec to insert {1} rows.".format((time.time() - start_time), rows))
-
-
 def oui_lookup(mac_address):
     """
         Prints the OUI of the provided mac address.
@@ -172,23 +196,65 @@ def oui_lookup(mac_address):
         
         return oui[0],ret[0] if ret is not None else None
 
-def main():
-    if (len(sys.argv) < 2):
-        print("Usage: {0} <mac-address>".format(sys.argv[0]))
-        sys.exit(0)
-        
-    if not os.path.exists("oui.db"):
-       parse_nmap_file()
 
-    vendor = oui_lookup(sys.argv[1])
+def check_mac_address(mac_address):
+    """ Replaces MAC address '-' delimiter with a semicolon ':'."""
+    if mac_address.find("-") > 0:
+        return mac_address.replace("-", ":")
+    
+    if mac_address.find(":") == -1 and len(mac_address) == 12:
+        return create_mac_address(mac_address)
+    
+    return mac_address
 
-    if vendor is not None:
+
+def get_oui(mac_address):
+    mac_address = check_mac_address(mac_address)
+
+    vendor = oui_lookup(mac_address)
+
+    if vendor[1] is not None:
         print("[*] Found vendor: {0} -> {1}".format(vendor[0], vendor[1]))
 
     else:
         print("[*] Vendor not found.")
 
 
+def bulker(file):
+    """ Parses a txt file containing MAC addresses """
+    if not os.path.exists(file):
+        print("File {0} doesn't exists.".format(file), file=sys.stderr)
+        print("Exiting...")
+        sys.exit()
+    
+    with open(file) as mac_list:
+        for line in mac_list.read().split("\n"):
+            print("Querying {0}".format(line))
+            get_oui(line)
+    
+
+def main():    
+    parser = argparse.ArgumentParser(description="OUI lookup script.",
+                                     usage="{0} -f [mac list] <mac address>".format(sys.argv[0]))
+
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("-m", dest="mac_address", type=str, action="store",
+                        help="Mac address.")
+
+    group.add_argument("-f", dest="file", type=str, action="store",
+                        help="File containing a list of MAC addresses",
+                        default=None)
+
+    args = parser.parse_args()
+
+    if not os.path.exists("oui.db"):
+       parse_nmap_file()
+
+    if args.file is not None:
+        bulker(args.file)
+    else:
+        get_oui(args.mac_address)
+
+
 if __name__ == "__main__":
     main()
-
