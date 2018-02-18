@@ -148,7 +148,7 @@ def insert_oui_data(cursor):
     
     # Close transaction.
     cursor.execute("COMMIT")
--
+
     # Close cursor.
     cursor.close()
 
