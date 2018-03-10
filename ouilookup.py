@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import codecs
 import os
 import requests
 import sys
@@ -35,21 +36,26 @@ def get_file():
     """
         Downloads a list of OUIs.
     """
-    url = "https://linuxnet.ca/ieee/oui/nmap-mac-prefixes"
-    print("[*] Downloading 'nmap-mac-prefixes' from https://linuxnet.ca.")
+    url = "https://code.wireshark.org/review/gitweb?p=wireshark.git;a=blob_plain;f=manuf;hb=HEAD"
+    print("[!] File w_manuf.txt not found!.\n")
+    print("[*] Downloading 'wireshark manufacturer list'")
 
     try:
         # Get the requested file. 
         response = requests.get(url, stream=True)
 
         # Create the 'vendormacs.txt' file.
-        with open("nmap-oui.txt", 'w') as out_file:
+        with codecs.open("w_manuf.txt", 'wb') as out_file:
 
+            bytes_w = 0
             # Write the returned data in chunks of 64 bytes.
-            for chunk in response.iter_content(chunk_size=64):
-                out_file.write(chunk.decode())
-
-        print("[*] File created.")
+            for chunk in response.iter_content(chunk_size=128):
+                # Bytes read to file.
+                bytes_w += len(chunk)
+                print("Bytes read: {:d}\r".format(bytes_w), end="\r")
+                out_file.write(chunk)
+            
+        print("\n[*] File created.")
         
     except KeyboardInterrupt:
         print("User requested an exit.")
@@ -57,35 +63,34 @@ def get_file():
         sys.exit(0)
     
     except Exception as e:
-        print("{0}".format(e))
-        sys.exit(0)
+        raise Exception(e)
 
 
-def create_mac_address(mac_address):
-    return ":".join([mac_address[inx:inx+2] for inx in range(0, len(mac_address), 2)])
-
-
-def read_nmap_file():
-    with open("nmap-oui.txt") as file:
+def read_wireshark_file():
+    with codecs.open("w_manuf.txt", "r", "utf-8") as file:
         for line in file.readlines():
-            # Split the spaces.
-            data = line.split()
+            # Skip the coments.
+            if (line[0] == "#") or (len(line) == 1):
+                continue
 
-            # Store mac prefix.
-            mac_prefix = create_mac_address(data[0])
+            data = line.split("\t")
 
-            # Store the whole vendor name.
-            vendor_name = " ".join(data[1:len(data)])
+            if len(data[0]) == 20:
+                mac = data.pop(0)
+                data.insert(0, mac[:17])
 
-            yield mac_prefix, vendor_name
+            if len(data) > 2:
+                full_vendor_name = data.pop(2)
+                data.insert(1, full_vendor_name)
+
+            yield data[0], data[1]
 
 
 def create_connection():
     """ Create the oui database or establish a connection to it. """
     try:
         # Creates the database.
-        conx = sqlite3.connect("oui.db")
-        return conx
+        return sqlite3.connect("oui.db")
 
     except sqlite3.Error as sqliteError:
         raise sqlite3.Error(sqliteError)
@@ -96,7 +101,7 @@ def create_connection():
     return None
 
 
-def create_oui_table(conx):
+def create_oui_table():
     """ Create the oui table. """
     create_table_sql = """ CREATE TABLE IF NOT EXISTS oui (
                                 id integer PRIMARY KEY,
@@ -105,7 +110,7 @@ def create_oui_table(conx):
                      );"""
     try:
         # Create the database cursor.
-        cursor = conx.cursor()
+        cursor = create_connection().cursor()
         
         # Execute the sql query.
         cursor.execute(create_table_sql)
@@ -118,13 +123,14 @@ def create_oui_table(conx):
         cursor.close()
         raise Exception(e)
     
-    finally:
-        return cursor
+    return cursor
     
 
-def insert_oui_data(cursor):
+def insert_oui_data():
     """ Insert the oui data in the oui table. """
     start_time = time.time()
+    cursor = create_oui_table()
+
     # Declare sql insert query.
     insert_query = "INSERT OR IGNORE INTO oui (mac_prefix, vendor_name) VALUES(?, ?)"
     
@@ -134,9 +140,9 @@ def insert_oui_data(cursor):
 
         # Count of sql rows.
         rows = 1
-
+        print("[*] Inserting data...")
         # Bulk insert.
-        for mac_prefix, vendor_name in read_nmap_file():
+        for mac_prefix, vendor_name in read_wireshark_file():
             cursor.execute(insert_query, (mac_prefix, vendor_name))
             rows += 1
         
@@ -156,27 +162,14 @@ def insert_oui_data(cursor):
     
 
 
-def parse_nmap_file():
-    """ Convert nmap-mac-prefixes file to a sqlite3 database. """
+def parse_w_manuf_file():
+    """ Convert w_manuf.txt file to a sqlite3 database. """
 
-    # Check if the nmap-mac-prefixes file exists.
-    if not os.path.exists("nmap-mac-prefixes"):
+    # Check if the w_manuf file exists.
+    if not os.path.exists("w_manuf.txt"):
         get_file()
 
-    try:
-        conx = create_connection()
-        cursor = create_oui_table(conx)
-        insert_oui_data(cursor)
-
-    except sqlite3.Error as e:
-        print("{0}".format(e))
-        conx.close()
-
-        sys.exit()
-
-    except Exception as e:
-        print(e)
-        sys.exit()
+    insert_oui_data()
 
 
 def oui_lookup(mac_address):
@@ -184,7 +177,7 @@ def oui_lookup(mac_address):
         Prints the OUI of the provided mac address.
     """
     # Get OUI of the provided macaddress.
-    oui = (mac_address.lower()[:8],)
+    oui = (mac_address.upper()[:8],)
     
     # Connect to database.
     with create_connection() as conx:
@@ -202,10 +195,14 @@ def check_mac_address(mac_address):
     if mac_address.find("-") > 0:
         return mac_address.replace("-", ":")
     
-    if mac_address.find(":") == -1 and len(mac_address) == 12:
+    if (mac_address.find(":") == -1) or (len(mac_address) >= 6):
         return create_mac_address(mac_address)
     
     return mac_address
+
+
+def create_mac_address(mac_address):
+    return ":".join([mac_address[inx:inx + 2] for inx in range(0, len(mac_address), 2)])
 
 
 def get_oui(mac_address):
@@ -234,8 +231,7 @@ def bulker(file):
     
 
 def main():    
-    parser = argparse.ArgumentParser(description="OUI lookup script.",
-                                     usage="{0} -f [mac list] <mac address>".format(sys.argv[0]))
+    parser = argparse.ArgumentParser(description="OUI lookup script.")
 
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("-m", dest="mac_address", type=str, action="store",
@@ -248,7 +244,7 @@ def main():
     args = parser.parse_args()
 
     if not os.path.exists("oui.db"):
-       parse_nmap_file()
+       parse_w_manuf_file()
 
     if args.file is not None:
         bulker(args.file)
